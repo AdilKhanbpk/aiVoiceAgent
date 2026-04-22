@@ -23,8 +23,8 @@ class EdgeTTS(tts.TTS):
         self._voice = voice
 
     def synthesize(self, text: str, *, conn_options: tts.APIConnectOptions) -> tts.SynthesizeStream:
-        # Final safety log: This will show the vLLM's answer even if synthesis fails
-        logger.info(f"🧠 [VLLM ANSWER]: \"{text}\"")
+        # Final safety log: This shows exactly what the TTS engine receives
+        logger.info(f"🧠 [VLLM -> TTS]: \"{text}\"")
         return EdgeSynthesizeStream(self, text, self._voice, conn_options)
 
 class EdgeSynthesizeStream(tts.SynthesizeStream):
@@ -86,18 +86,21 @@ SALESMAN_PROMPT = """
 NAME & ROLE: You are "Areeba", a professional and elite Senior Travel Consultant at Mosafir.pk.
 TARGET: Selling premium Pakistan travel packages.
 
+STRICT FOCUS:
+- Every single response MUST be in Urdu script (نستعلیق/اردو رسم الخط). 
+- NEVER use Roman Urdu or English letters for Urdu words (e.g., Never write 'kese ho').
+- Your first response must be a warm greeting of EXACTLY 10 to 15 words.
+  Example Greeting: "السلام علیکم! مسافر ڈاٹ پی کے میں خوش آمدید۔ میں اریبا ہوں۔ آپ کہاں جائیں گے؟"
+
 STRICT OPERATING RULES:
-1. LANGUAGE: Speak EXCLUSIVELY in Urdu script (اردو). If the user speaks in Roman Urdu (like 'kese ho ap'), you MUST still respond in proper Urdu script. Use English only for brand names (Mosafir.pk) or technical terms (Booking, Ticket).
-2. CONCISENESS: Responses MUST be between 20-40 words. Voice conversations must be snappy.
-3. TONE: High-end hospitality. Use "Aap" and "Sahib/Sahiba". Be warm but business-focused.
+1. LANGUAGE: Speak EXCLUSIVELY in Urdu script (اردو).
+2. CONCISENESS: Responses MUST be between 10-25 words.
+3. TONE: High-end hospitality. Use "Aap" and "Sahib/Sahiba".
 
 CONVERSATION LOGIC:
-- PHASE 1 (Discovery): If you don't know the destination or duration, you MUST ask: "Aap kahan jana chahte hain aur kitne dinon ke liye?"
-- PHASE 2 (Handling Confusion): If the user's input is unclear or noisy, say: "Maazrat chahti hoon, main aap ki baat samajh nahi saki. Kya aap baraye meherbani doobara bata sakte hain?"
-- PHASE 3 (The Pitch): Once you have the destination/days, provide a dummy "Mosafir Exclusive" package. 
-  Example: "Behtareen! Hunza ke 5 dinon ke liye hamare paas 'Luxury North' package hai jis mein hotel aur travel shamil hai."
-
-CURRENT GOAL: Get the user's destination and duration, then offer a dummy travel deal.
+- PHASE 1 (Greeting): Start with a 10-15 word welcome. 
+- PHASE 2 (No English Letters): If you use English letters for Urdu, you have failed.
+- PHASE 3 (Travel Focus): Only talk about tours and bookings.
 """
 
 # Hardcoded Credentials as requested for debugging
@@ -129,6 +132,7 @@ async def entrypoint(ctx: JobContext):
             base_url=VLLM_URL,
             api_key="not-needed",
             model=VLLM_MODEL,
+            temperature=0.5, # Lower temperature for strictly professional tone
         )
 
         # 2. Setup Voice Pipeline
@@ -157,9 +161,9 @@ async def entrypoint(ctx: JobContext):
 
         @session.on("user_speech_committed")
         def _user_speech(msg: agents.voice.SpeechData):
-            logger.info(f"🎤 [Deepgram Transcript]: \"{msg.text}\"")
-            # Direct console output for maximum visibility
-            print(f"\n💬 YOU SAID: {msg.text}\n")
+            # The exact text handed off from STT to LLM
+            print(f"\nUser input query : {msg.text}\n")
+            logger.info(f"🎤 [DEEPGRAM -> VLLM]: \"{msg.text}\"")
             
             # Async task to send data to the specified URL
             async def send_to_url(text):
@@ -182,7 +186,9 @@ async def entrypoint(ctx: JobContext):
 
         @session.on("agent_speech_committed")
         def _agent_speech(msg: agents.voice.SpeechData):
+            # The final answer committed to speech
             logger.info(f"🤖 [BACKEND] [Areeba's Response]: \"{msg.text}\"")
+            print(f"🤖 Areeba: {msg.text}")
 
         @session.on("agent_stopped_speaking")
         def _agent_stopped():
