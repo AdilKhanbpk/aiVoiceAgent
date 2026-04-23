@@ -8,13 +8,16 @@ import av
 import edge_tts
 from livekit import agents, rtc
 from livekit.agents import AgentSession, Agent, JobContext, cli, tts, tokenize
-from livekit.plugins import openai, deepgram, silero
+from livekit.plugins import openai, deepgram, silero, groq
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ─────────────────────────────────────────────────────────────
 # CUSTOM FREE URDU TTS (Microsoft Edge)
 # ─────────────────────────────────────────────────────────────
 class EdgeTTS(tts.TTS):
-    def __init__(self, voice: str = "ur-PK-UzmaNeural"):
+    def __init__(self, voice: str = "hi-IN-SwaraNeural"):
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=False, aligned_transcript=False),
             sample_rate=24000,
@@ -24,7 +27,7 @@ class EdgeTTS(tts.TTS):
 
     def synthesize(self, text: str, *, conn_options: tts.APIConnectOptions) -> tts.SynthesizeStream:
         # Final safety log: This shows exactly what the TTS engine receives
-        logger.info(f"🧠 [VLLM -> TTS]: \"{text}\"")
+        logger.info(f"🧠 [LLM -> TTS]: \"{text}\"")
         return EdgeSynthesizeStream(self, text, self._voice, conn_options)
 
 class EdgeSynthesizeStream(tts.SynthesizeStream):
@@ -35,7 +38,7 @@ class EdgeSynthesizeStream(tts.SynthesizeStream):
 
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         try:
-            communicate = edge_tts.Communicate(self._text, self._voice)
+            communicate = edge_tts.Communicate(self._text, self._voice, rate="+20%")
             audio_data = io.BytesIO()
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
@@ -83,31 +86,32 @@ logger.setLevel(logging.DEBUG) # Set to DEBUG for maximum output
 # SALESMAN SYSTEM PROMPT
 # ─────────────────────────────────────────────────────────────
 SALESMAN_PROMPT = """
-NAME & ROLE: You are "Areeba", a professional and elite Senior Travel Consultant at Mosafir.pk.
+NAME & ROLE: You are "Areeba", a friendly and professional Senior Travel Consultant at Mosafir.pk.
 TARGET: Selling premium Pakistan travel packages.
 
 STRICT FOCUS:
-- Every single response MUST be in Urdu script (نستعلیق/اردو رسم الخط). 
-- NEVER use Roman Urdu or English letters for Urdu words (e.g., Never write 'kese ho').
-- Your first response must be a warm greeting of EXACTLY 10 to 15 words.
-  Example Greeting: "السلام علیکم! مسافر ڈاٹ پی کے میں خوش آمدید۔ میں اریبا ہوں۔ آپ کہاں جائیں گے؟"
+- STYLE: Use simple Hindi (conversational style).
+- VOCABULARY: Use common Hindi words. Avoid difficult or formal Urdu/Sanskrit words.
+- SCRIPT: Every single response MUST be in Hindi script (Devanagari/हिंदी). 
+- PRONUNCIATION: Write in a way that sounds natural for the "Swara" voice you are using.
 
 STRICT OPERATING RULES:
-1. LANGUAGE: Speak EXCLUSIVELY in Urdu script (اردو).
+1. LANGUAGE: Speak EXCLUSIVELY in Hindi script (हिंदी).
 2. CONCISENESS: Responses MUST be between 10-25 words.
-3. TONE: High-end hospitality. Use "Aap" and "Sahib/Sahiba".
+3. TONE: Warm and helpful hospitality. Use "Aap" and "Ji".
 
 CONVERSATION LOGIC:
-- PHASE 1 (Greeting): Start with a 10-15 word welcome. 
-- PHASE 2 (No English Letters): If you use English letters for Urdu, you have failed.
-- PHASE 3 (Travel Focus): Only talk about tours and bookings.
+- PHASE 1 (Greeting): Always start with: "नमस्ते, मुसाफिर की ओर से अरीबा बात कर रही हूँ। बताइए, मैं आपकी क्या मदद कर सकती हूँ?"
+- PHASE 2 (No English Letters): NEVER use English letters for Hindi words.
+- PHASE 3 (Travel Focus): Assist with tours and bookings after the greeting.
 """
 
 # Hardcoded Credentials as requested for debugging
-LIVEKIT_URL = "wss://livecallagent-vo2v1k51.livekit.cloud"
-DEEPGRAM_API_KEY = "151b44d0af7076214f9d8b2800284ad552ec8a9e"
-VLLM_URL = "https://unworn-numeric-move.ngrok-free.dev/v1"
-VLLM_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+# Credentials from environment
+LIVEKIT_URL = os.getenv("LIVEKIT_URL", "wss://livecallagent-vo2v1k51.livekit.cloud")
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 async def entrypoint(ctx: JobContext):
     logger.info(f"🚀 [JOB START] Registered for room: {ctx.room.name}")
@@ -117,22 +121,11 @@ async def entrypoint(ctx: JobContext):
         await ctx.connect()
         logger.info(f"✅ [CONNECTED] Agent joined room: {ctx.room.name}")
 
-        # 0. Check LLM Connectivity
-        logger.info(f"🔍 [BACKEND] [vLLM] Checking connection to: {VLLM_URL}/models")
-        try:
-            async with aiohttp.ClientSession() as session_test:
-                async with session_test.get(VLLM_URL + "/models", timeout=2) as resp:
-                    logger.info(f"✅ [BACKEND] [vLLM] Connection verified (Status {resp.status})")
-        except Exception:
-            logger.warning(f"⚠️ [BACKEND] [vLLM] OFFLINE. Ahmed cannot think without Colab/ngrok running.")
-
-        # 1. Setup Brain (vLLM)
-        logger.debug(f"🧠 [LLM CONFIG] Using vLLM at {VLLM_URL} with model {VLLM_MODEL}")
-        vllm_llm = openai.LLM(
-            base_url=VLLM_URL,
-            api_key="not-needed",
-            model=VLLM_MODEL,
-            temperature=0.5, # Lower temperature for strictly professional tone
+        # 1. Setup Brain (Groq)
+        logger.debug(f"🧠 [LLM CONFIG] Using Groq with model {GROQ_MODEL}")
+        llm = groq.LLM(
+            model=GROQ_MODEL,
+            temperature=0.7,
         )
 
         # 2. Setup Voice Pipeline
@@ -141,11 +134,11 @@ async def entrypoint(ctx: JobContext):
             stt=deepgram.STT(
                 api_key=DEEPGRAM_API_KEY,
                 model="nova-3",
-                language="ur",
+                language="hi",
             ),
-            llm=vllm_llm,
+            llm=llm,
             tts=tts.StreamAdapter(
-                tts=EdgeTTS(voice="ur-PK-UzmaNeural"), # Free Microsoft Urdu Voice
+                tts=EdgeTTS(voice="hi-IN-SwaraNeural"), # Swara Hindi Voice (as requested)
                 sentence_tokenizer=tokenize.basic.SentenceTokenizer(),
             ),
         )
@@ -163,7 +156,7 @@ async def entrypoint(ctx: JobContext):
         def _user_speech(msg: agents.voice.SpeechData):
             # The exact text handed off from STT to LLM
             print(f"\nUser input query : {msg.text}\n")
-            logger.info(f"🎤 [DEEPGRAM -> VLLM]: \"{msg.text}\"")
+            logger.info(f"🎤 [DEEPGRAM -> GROQ]: \"{msg.text}\"")
             
             # Async task to send data to the specified URL
             async def send_to_url(text):
@@ -207,7 +200,7 @@ async def entrypoint(ctx: JobContext):
         # Initial Greeting
         logger.info("👋 [GREETING] Triggering initial Urdu welcome...")
         await session.generate_reply(
-            instructions="Greet the customer warmly in Urdu as Areeba from Mosafir.pk. Ask where they want to go in Pakistan. Keep it short (max 50 words)."
+            instructions='Start the conversation by saying exactly: "नमस्ते, मुसाफिर की ओर से अरीबा बात कर रही हूँ। बताइए, मैं आपकी क्या मदद कर सकती हूँ?"'
         )
 
         # 4. Instant Shutdown Trigger
